@@ -1,8 +1,10 @@
 import asyncio
 import gui
 import time
+import datetime
 import argparse
 import os
+import aiofiles
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -33,18 +35,30 @@ def get_parser_args():
     return parser.parse_args()
 
 
-async def generate_msgs(queue):
-    while True:
-        queue.put_nowait(f'Ping {time.time()}')
-        await asyncio.sleep(1)
+#async def generate_msgs(queue):
+#    while True:
+#        queue.put_nowait(f'Ping {time.time()}')
+#        await asyncio.sleep(1)
 
 
-async def read_msgs(host, port, queue):
+async def save_messages(history, queue):
+    now = datetime.datetime.now()
+    async with aiofiles.open(history, 'a') as file:
+        await file.write(f'[{now.strftime("%d.%m.%y %H:%M")}] {queue}')
+
+
+async def load_history_to_chat(history, queue):
+    async with aiofiles.open(history, 'r') as file:
+        queue.put_nowait(await file.read())
+
+
+async def read_msgs(host, port, history, queue):
     while True:
         try:
             reader, writer = await asyncio.open_connection(host, port)
             data = await asyncio.wait_for(reader.readline(), timeout=5)
             queue.put_nowait(data.decode())
+            await save_messages(history, data.decode())
         finally:
             writer.close()
 
@@ -58,7 +72,8 @@ async def main():
 
     await asyncio.gather(
         gui.draw(messages_queue, sending_queue, status_updates_queue),
-        read_msgs(args.host, args.port, messages_queue)
+        load_history_to_chat(args.history, messages_queue),
+        read_msgs(args.host, args.port, args.history, messages_queue)
     )
 
 
