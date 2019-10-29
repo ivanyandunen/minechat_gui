@@ -1,10 +1,12 @@
 import asyncio
 import gui
-import time
+# import time
 import datetime
 import argparse
 import os
+import logging
 import aiofiles
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -18,9 +20,14 @@ def get_parser_args():
         default=os.getenv('HOST')
     )
     parser.add_argument(
-        '--port',
+        '--iport',
         help='Specify remote port to read data. Default is 5000',
-        default=os.getenv('PORT')
+        default=os.getenv('READER_PORT')
+    )
+    parser.add_argument(
+        '--oport',
+        help='Specify remote port to read data. Default is 5050',
+        default=os.getenv('WRITER_PORT')
     )
     parser.add_argument(
         '--history',
@@ -28,14 +35,20 @@ def get_parser_args():
         default=os.getenv('HISTORY_FILE')
     )
     parser.add_argument(
+        '--token',
+        help='Token for registered user',
+        default=os.getenv('TOKEN')
+    )
+    parser.add_argument(
         '--debug',
         help='Enable debug',
         default=False,
+        action='store_true'
         )
     return parser.parse_args()
 
 
-#async def generate_msgs(queue):
+# async def generate_msgs(queue):
 #    while True:
 #        queue.put_nowait(f'Ping {time.time()}')
 #        await asyncio.sleep(1)
@@ -63,9 +76,37 @@ async def read_msgs(host, port, history, queue):
             writer.close()
 
 
+async def authorize(reader, writer, token):
+    writer.write(f'{token}\n'.encode())
+    await writer.drain()
+    data = await reader.readline()
+    account_info = json.loads(data.decode())
+    logging.debug(f'Выполнена авторизация. Пользователь {account_info["nickname"]}.')
+
+
+async def send_msgs(writer, queue):
+    message = await queue.get()
+    logging.debug(f'Пользователь написал: {message}')
+    message = message.replace('\n', ' ')
+    writer.write(f'{message}\n\n'.encode())
+    await writer.drain()
+
+
+async def open_writer(host, port, token, queue):
+    try:
+        reader, writer = await asyncio.open_connection(host, port)
+        if await reader.readline():
+            if token:
+                await authorize(reader, writer, token)
+            await send_msgs(writer, queue)
+    finally:
+        writer.close()
+
+
 async def main():
     args = get_parser_args()
-    print(args.host, args.port)
+    if args.debug:
+        logging.basicConfig(level=logging.DEBUG)
     messages_queue = asyncio.Queue()
     sending_queue = asyncio.Queue()
     status_updates_queue = asyncio.Queue()
@@ -73,7 +114,8 @@ async def main():
     await asyncio.gather(
         gui.draw(messages_queue, sending_queue, status_updates_queue),
         load_history_to_chat(args.history, messages_queue),
-        read_msgs(args.host, args.port, args.history, messages_queue)
+        read_msgs(args.host, args.iport, args.history, messages_queue),
+        open_writer(args.host, args.oport, args.token, sending_queue)
     )
 
 
