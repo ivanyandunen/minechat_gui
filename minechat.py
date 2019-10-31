@@ -1,6 +1,5 @@
 import asyncio
 import gui
-# import time
 import datetime
 import argparse
 import os
@@ -8,8 +7,14 @@ import logging
 import aiofiles
 import json
 from dotenv import load_dotenv
+from tkinter import messagebox
+
 
 load_dotenv()
+
+
+class InvalidToken(Exception):
+    pass
 
 
 def get_parser_args():
@@ -48,12 +53,6 @@ def get_parser_args():
     return parser.parse_args()
 
 
-# async def generate_msgs(queue):
-#    while True:
-#        queue.put_nowait(f'Ping {time.time()}')
-#        await asyncio.sleep(1)
-
-
 async def save_messages(history, queue):
     now = datetime.datetime.now()
     async with aiofiles.open(history, 'a') as file:
@@ -80,6 +79,9 @@ async def authorize(reader, writer, token):
     writer.write(f'{token}\n'.encode())
     await writer.drain()
     data = await reader.readline()
+    if data.decode() == 'null\n':
+        logging.debug('Token is invalid')
+        raise InvalidToken()
     account_info = json.loads(data.decode())
     logging.debug(f'Выполнена авторизация. Пользователь {account_info["nickname"]}.')
 
@@ -121,4 +123,9 @@ async def main():
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
+    try:
+        loop.run_until_complete(main())
+    except (KeyboardInterrupt, gui.TkAppClosed):
+        logging.debug('\n Closed by user')
+    except InvalidToken:
+        messagebox.showerror('Invalid Token', 'Authorization failed. Check your token')
