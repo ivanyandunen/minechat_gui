@@ -6,6 +6,7 @@ import os
 import logging
 import aiofiles
 import json
+import socket
 from dotenv import load_dotenv
 from tkinter import messagebox
 
@@ -64,15 +65,49 @@ async def load_history_to_chat(history, queue):
         queue.put_nowait(await file.read())
 
 
-async def read_msgs(host, port, history, queue):
+async def count_reconnection_delay(connection_attempts):
+    if connection_attempts < 5:
+        return 3
+    elif connection_attempts >= 5 and connection_attempts < 10:
+        return 10
+    elif connection_attempts >= 10:
+        return 20
+
+
+async def wait_before_reconnection(delay, history, queue):
+    if delay:
+        queue.put_nowait(f'No connection. Trying to connect in {delay} secs...\n')
+        save_messages(
+            history,
+            f'No connection. Trying to connect in {delay} secs...\n'
+            )
+        await asyncio.sleep(delay)
+
+
+async def read_msgs(host, port, history, messages_queue, status_updates_queue):
+    connection_attempts = 0
+
     while True:
         try:
             reader, writer = await asyncio.open_connection(host, port)
+            status_updates_queue.put_nowait(
+                gui.ReadConnectionStateChanged.ESTABLISHED
+                )
             data = await asyncio.wait_for(reader.readline(), timeout=5)
-            queue.put_nowait(data.decode())
+            messages_queue.put_nowait(data.decode())
             await save_messages(history, data.decode())
+        except (asyncio.TimeoutError, ConnectionRefusedError, socket.gaierror):
+            logging.debug('No connection')
+            status_updates_queue.put_nowait(
+                gui.ReadConnectionStateChanged.INITIATED
+                )
+            delay = await count_reconnection_delay(connection_attempts)
+            await wait_before_reconnection(delay, history, messages_queue)
+            connection_attempts += 1
+            continue
         finally:
             writer.close()
+            gui.ReadConnectionStateChanged.CLOSED
 
 
 async def authorize(reader, writer, token):
@@ -84,6 +119,7 @@ async def authorize(reader, writer, token):
         raise InvalidToken()
     account_info = json.loads(data.decode())
     logging.debug(f'Выполнена авторизация. Пользователь {account_info["nickname"]}.')
+    return account_info
 
 
 async def send_msgs(writer, queue):
@@ -94,15 +130,27 @@ async def send_msgs(writer, queue):
     await writer.drain()
 
 
-async def open_writer(host, port, token, queue):
-    try:
-        reader, writer = await asyncio.open_connection(host, port)
-        if await reader.readline():
-            if token:
-                await authorize(reader, writer, token)
-            await send_msgs(writer, queue)
-    finally:
-        writer.close()
+async def open_writer(host, port, token, sending_queue, status_updates_queue):
+    while True:
+        try:
+            reader, writer = await asyncio.open_connection(host, port)
+            status_updates_queue.put_nowait(
+                gui.SendingConnectionStateChanged.ESTABLISHED
+                )
+            if await reader.readline():
+                if token:
+                    account_info = await authorize(reader, writer, token)
+                    status_updates_queue.put_nowait(
+                        gui.NicknameReceived(account_info['nickname'])
+                        )
+                await send_msgs(writer, sending_queue)
+        except (asyncio.TimeoutError, ConnectionRefusedError, socket.gaierror):
+            status_updates_queue.put_nowait(
+                gui.SendingConnectionStateChanged.INITIATED
+                )
+            continue
+        finally:
+            writer.close()
 
 
 async def main():
@@ -116,8 +164,20 @@ async def main():
     await asyncio.gather(
         gui.draw(messages_queue, sending_queue, status_updates_queue),
         load_history_to_chat(args.history, messages_queue),
-        read_msgs(args.host, args.iport, args.history, messages_queue),
-        open_writer(args.host, args.oport, args.token, sending_queue)
+        read_msgs(
+            args.host,
+            args.iport,
+            args.history,
+            messages_queue,
+            status_updates_queue
+            ),
+        open_writer(
+            args.host,
+            args.oport,
+            args.token,
+            sending_queue,
+            status_updates_queue
+            )
     )
 
 
